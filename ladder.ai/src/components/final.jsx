@@ -17,6 +17,7 @@ const MorphingWaveToSphere = () => {
   const cameraRef = useRef(null);
   const frameIdRef = useRef(null);
   const scrollRef = useRef({ current: 0, target: 0 });
+  const mouseRef = useRef({ x: 0, y: 0 });
 
   useEffect(() => {
     if (!containerRef.current) return;
@@ -42,7 +43,8 @@ const MorphingWaveToSphere = () => {
     const renderer = new THREE.WebGLRenderer({
       alpha: true,
       antialias: true,
-      powerPreference: "high-performance"
+      powerPreference: "high-performance",
+      precision: "highp"
     });
     renderer.setSize(window.innerWidth, window.innerHeight);
     renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
@@ -50,21 +52,21 @@ const MorphingWaveToSphere = () => {
     rendererRef.current = renderer;
 
     // ========================================
-    // GEOMETRY: High-density plane grid (like hero_back_dots)
-    // This is the BASE geometry - wave positions are the default
+    // GEOMETRY: High-density plane grid
+    // Optimized count for better performance while maintaining density
     // ========================================
     const width = 240;
     const height = 120;
-    const segmentsX = 240;
-    const segmentsY = 120;
+    const segmentsX = 200;
+    const segmentsY = 100;
     const geometry = new THREE.PlaneGeometry(width, height, segmentsX, segmentsY);
-    
+
     const count = geometry.attributes.position.count;
-    
+
     // Calculate sphere positions for each grid point
     const spherePositions = new Float32Array(count * 3);
     const sphereNormals = new Float32Array(count * 3);
-    const sphereRadius = 18; // Even smaller = dots very close together
+    const sphereRadius = 18;
     const randoms = new Float32Array(count);
     const delays = new Float32Array(count);
 
@@ -88,23 +90,24 @@ const MorphingWaveToSphere = () => {
       spherePositions[i * 3] = x;
       spherePositions[i * 3 + 1] = y;
       spherePositions[i * 3 + 2] = z;
-      
+
       // Sphere normals (normalized position for a centered sphere)
-      const len = Math.sqrt(x*x + y*y + z*z);
+      const len = Math.sqrt(x * x + y * y + z * z);
       sphereNormals[i * 3] = x / len;
       sphereNormals[i * 3 + 1] = y / len;
       sphereNormals[i * 3 + 2] = z / len;
-      
+
       // Random value for variation
       randoms[i] = Math.random();
-      
+
       // Delay based on distance from center of the grid
       // Center particles transition first, edges last
       const centerX = segmentsX / 2;
       const centerY = segmentsY / 2;
       const distFromCenter = Math.sqrt((ix - centerX) ** 2 + (iy - centerY) ** 2);
       const maxDist = Math.sqrt(centerX ** 2 + centerY ** 2);
-      delays[i] = (distFromCenter / maxDist) * 0.4;
+      // Smoother delay distribution
+      delays[i] = (distFromCenter / maxDist) * 0.5;
     }
 
     geometry.setAttribute('aSpherePosition', new THREE.BufferAttribute(spherePositions, 3));
@@ -114,20 +117,20 @@ const MorphingWaveToSphere = () => {
 
     // ========================================
     // SHADER MATERIAL
-    // Wave -> Sphere transition with ORIGINAL colors from both files
     // ========================================
     const material = new THREE.ShaderMaterial({
       uniforms: {
         uTime: { value: 0 },
-        uScroll: { value: 0 }, // 0 = wave, 1 = sphere
-        // Original colors from hero_back_dots.jsx
-        uColor1: { value: new THREE.Color('#8B0000') }, // Dark red
-        uColor2: { value: new THREE.Color('#FF4500') }, // Orange red
-        uColor3: { value: new THREE.Color('#FFD700') }, // Gold
+        uScroll: { value: 0 },
+        uMouse: { value: new THREE.Vector2(0, 0) }, // Mouse position in NDC
+        uColor1: { value: new THREE.Color('#8B0000') },
+        uColor2: { value: new THREE.Color('#FF4500') },
+        uColor3: { value: new THREE.Color('#FFD700') },
       },
       vertexShader: `
         uniform float uTime;
         uniform float uScroll;
+        uniform vec2 uMouse;
         
         attribute vec3 aSpherePosition;
         attribute vec3 aSphereNormal;
@@ -139,7 +142,28 @@ const MorphingWaveToSphere = () => {
         varying float vMorphProgress;
         varying float vNoise;
 
-        // --- Simplex Noise Functions (from sphere.jsx) ---
+        // --- Rotation Matrix ---
+        mat3 rotateX(float angle) {
+            float s = sin(angle);
+            float c = cos(angle);
+            return mat3(
+                1.0, 0.0, 0.0,
+                0.0, c, -s,
+                0.0, s, c
+            );
+        }
+
+        mat3 rotateY(float angle) {
+            float s = sin(angle);
+            float c = cos(angle);
+            return mat3(
+                c, 0.0, s,
+                0.0, 1.0, 0.0,
+                -s, 0.0, c
+            );
+        }
+
+        // --- Simplex Noise Functions ---
         vec3 mod289(vec3 x) { return x - floor(x * (1.0 / 289.0)) * 289.0; }
         vec4 mod289(vec4 x) { return x - floor(x * (1.0 / 289.0)) * 289.0; }
         vec4 permute(vec4 x) { return mod289(((x*34.0)+1.0)*x); }
@@ -208,47 +232,79 @@ const MorphingWaveToSphere = () => {
         void main() {
           vec3 pos = position;
           
-          // === WAVE STATE (uScroll = 0) - From hero_back_dots ===
-          // Multiple wave layers with different speeds and amplitudes
-          float wave1 = sin(pos.y * 0.02 + uTime * 1.5) * 8.0;
-          float wave2 = sin(pos.y * 0.04 - uTime * 1.2) * 6.0;
-          float wave3 = sin(pos.y * 0.08 + uTime * 2.0) * 4.0;
-          float wave4 = sin(pos.x * 0.03 - uTime * 1.0) * 7.0;
-          float wave5 = sin((pos.x + pos.y) * 0.025 + uTime * 0.8) * 5.0;
-          float wave6 = cos(pos.x * 0.035 - pos.y * 0.02 + uTime * 1.3) * 4.5;
-          float detail1 = sin(pos.x * 0.1 + pos.y * 0.08 + uTime * 2.5) * 2.0;
-          float detail2 = cos(pos.x * 0.12 - pos.y * 0.1 - uTime * 3.0) * 1.5;
+          // === WAVE STATE (uScroll = 0) ===
+          // SLOWER, SMOOTHER WAVE MOTION
+          // Reduced frequencies and time multipliers
+          float wave1 = sin(pos.y * 0.02 + uTime * 0.8) * 8.0;
+          float wave2 = sin(pos.y * 0.04 - uTime * 0.6) * 6.0;
+          float wave3 = sin(pos.y * 0.08 + uTime * 1.0) * 4.0;
+          float wave4 = sin(pos.x * 0.03 - uTime * 0.5) * 7.0;
+          float wave5 = sin((pos.x + pos.y) * 0.025 + uTime * 0.4) * 5.0;
+          float wave6 = cos(pos.x * 0.035 - pos.y * 0.02 + uTime * 0.7) * 4.5;
           
-          float elevation = wave1 + wave2 + wave3 + wave4 + wave5 + wave6 + detail1 + detail2;
+          // Reduced detail noise for smoother look
+          float detail1 = sin(pos.x * 0.1 + pos.y * 0.08 + uTime * 1.2) * 1.5;
+          
+          float elevation = wave1 + wave2 + wave3 + wave4 + wave5 + wave6 + detail1;
           
           vec3 wavePos = pos;
           wavePos.z += elevation;
+
+          // Apply the SHEET ROTATION here in the shader
+          wavePos = rotateX(-3.14159 / 2.2) * wavePos;
           
-          // === SPHERE STATE (uScroll = 1) - From sphere.jsx ===
+          // === SPHERE STATE (uScroll = 1) ===
           vec3 spherePos = aSpherePosition;
           
-          // Apply noise displacement to sphere (reduced for better circular shape)
-          float noise = snoise(aSpherePosition * 0.05 + uTime * 0.2);
-          spherePos += aSphereNormal * noise * 2.5; // Reduced displacement for rounder shape
+          // FASTER, MORE FLUID NOISE for sphere (to fix "laggy" feel)
+          // Increased time multiplier from 0.15 to 0.8
+          float noise = snoise(aSpherePosition * 0.12 + uTime * 0.8);
+          spherePos += aSphereNormal * noise * 3.0; 
           
+          // FASTER sphere spin (to fix "laggy" feel)
+          // Increased speed from 0.08 to 0.3
+          spherePos = rotateY(uTime * 0.3) * spherePos;
+
           // === STAGGERED TRANSITION ===
-          // Each particle transitions at slightly different times
-          float adjustedScroll = uScroll * 1.4 - aDelay;
+          // Smoother transition curve
+          float adjustedScroll = uScroll * 1.8 - aDelay; 
           float localProgress = clamp(adjustedScroll, 0.0, 1.0);
-          localProgress = smoothstep(0.0, 1.0, localProgress);
+          
+          // Cubic easing for extra smoothness
+          localProgress = localProgress * localProgress * (3.0 - 2.0 * localProgress);
+          
           vMorphProgress = localProgress;
           
-          // === SMOOTH MORPH with convergence effect ===
-          // Particles converge toward center before forming sphere
-          float convergeFactor = sin(localProgress * 3.14159); // Peaks at 0.5
+          // === DIRECT 2D MORPH ===
+          vec3 finalPos = mix(wavePos, spherePos, localProgress);
           
-          vec3 convergePoint = vec3(0.0, 0.0, 0.0); // Center point
-          vec3 toCenter = convergePoint - wavePos;
+          // === MOUSE INTERACTION (Repulsion) ===
+          // Project finalPos to Clip Space to get NDC
+          vec4 clipPos = projectionMatrix * modelViewMatrix * vec4(finalPos, 1.0);
+          vec2 ndc = clipPos.xy / clipPos.w;
           
-          vec3 intermediatePos = wavePos + toCenter * convergeFactor * 0.3;
+          // Calculate distance to mouse in screen space
+          float dist = distance(ndc, uMouse);
           
-          // Final blend
-          vec3 finalPos = mix(intermediatePos, spherePos, localProgress);
+          // Repulsion radius (0.4 NDC units)
+          float repulsion = smoothstep(0.4, 0.0, dist);
+          
+          // Push particles outward from their origin (or just along normal)
+          // We use aSphereNormal for sphere state, and simple Z for wave state
+          // But mixing them is tricky. Let's just push along the view direction or normal.
+          // Simple "bulge" effect: move towards camera
+          
+          // Only apply repulsion when close to sphere state (uScroll > 0.5) or always?
+          // User asked for "dots interactive", usually implies always or mostly sphere.
+          // Let's make it work for both but stronger on sphere.
+          
+          vec3 repulsionDir = normalize(finalPos); // Push away from center (works best for sphere)
+          if (uScroll < 0.5) {
+             repulsionDir = vec3(0.0, 0.0, 1.0); // Push up for wave
+          }
+          
+          // Apply repulsion
+          finalPos += repulsionDir * repulsion * 5.0; // 5.0 unit displacement
           
           // === PASS VARYINGS ===
           vElevation = mix(elevation, noise * 30.0, localProgress);
@@ -258,10 +314,9 @@ const MorphingWaveToSphere = () => {
           gl_Position = projectionMatrix * mvPosition;
           
           // === POINT SIZE ===
-          // Wave: size based on elevation (from hero_back_dots)
-          // Sphere: BIGGER dots, closer together
           float waveSize = 4.0 * (1.0 + elevation / 30.0) * (30.0 / -mvPosition.z);
-          float sphereSize = (4.0 / -mvPosition.z) * 55.0; // Very big dots
+          float sphereSize = (4.0 / -mvPosition.z) * 80.0; 
+          
           gl_PointSize = mix(waveSize, sphereSize, localProgress);
           
           vDistance = -mvPosition.z;
@@ -278,13 +333,10 @@ const MorphingWaveToSphere = () => {
         varying float vNoise;
 
         void main() {
-          // Circular particle with soft edges
           float d = distance(gl_PointCoord, vec2(0.5));
           if (d > 0.5) discard;
           
-          float alpha = smoothstep(0.5, 0.3, d);
-
-          // === WAVE COLORS (from hero_back_dots) ===
+          // === WAVE COLORS ===
           float mixStrength = (vElevation + 25.0) / 50.0;
           mixStrength = clamp(mixStrength, 0.0, 1.0);
           
@@ -292,12 +344,9 @@ const MorphingWaveToSphere = () => {
           float highlight = smoothstep(0.75, 1.0, mixStrength);
           waveColor = mix(waveColor, uColor3, highlight * 0.6);
           
-          // === SPHERE COLORS (from sphere.jsx) ===
-          // Deep blood red (shadows)
+          // === SPHERE COLORS ===
           vec3 colorDeep = vec3(0.4, 0.02, 0.02);
-          // Standard red-orange (mid)
           vec3 colorMid = vec3(0.8, 0.1, 0.05);
-          // Vibrant orange (highlights)
           vec3 colorHighlight = vec3(1.0, 0.4, 0.0);
           
           float n = smoothstep(-0.4, 0.4, vNoise);
@@ -309,13 +358,19 @@ const MorphingWaveToSphere = () => {
             sphereColor = mix(colorMid, colorHighlight, (n - 0.6) / 0.4);
           }
           
-          // === BLEND COLORS based on morph progress ===
+          // === BLEND COLORS ===
           vec3 finalColor = mix(waveColor, sphereColor, vMorphProgress);
 
           // Distance fog
           float fog = smoothstep(20.0, 100.0, vDistance);
           
-          gl_FragColor = vec4(finalColor, (1.0 - fog * 0.5) * alpha * 0.85);
+          // Alpha logic
+          float waveAlpha = smoothstep(0.5, 0.3, d) * 0.85;
+          float sphereAlpha = 0.8 - smoothstep(0.2, 0.5, d);
+          
+          float finalAlpha = mix(waveAlpha, sphereAlpha, vMorphProgress);
+          
+          gl_FragColor = vec4(finalColor, (1.0 - fog * 0.5) * finalAlpha);
         }
       `,
       transparent: true,
@@ -326,7 +381,6 @@ const MorphingWaveToSphere = () => {
     materialRef.current = material;
 
     const particles = new THREE.Points(geometry, material);
-    particles.rotation.x = -Math.PI / 2.2; // Initial rotation for wave view
     particlesRef.current = particles;
     scene.add(particles);
 
@@ -343,61 +397,53 @@ const MorphingWaveToSphere = () => {
       // Smooth scroll interpolation
       scrollRef.current.current += (scrollRef.current.target - scrollRef.current.current) * 0.05;
       const scroll = scrollRef.current.current;
-      
-      material.uniforms.uTime.value = elapsedTime * 0.5; // Slower wave motion
+
+      // Slower global time for smoother, more elegant motion
+      material.uniforms.uTime.value = elapsedTime * 0.2;
       material.uniforms.uScroll.value = scroll;
 
+      // Update mouse uniform
+      // Smoothly interpolate mouse for fluid feel
+      const targetMouse = mouseRef.current;
+      const currentMouse = material.uniforms.uMouse.value;
+      currentMouse.x += (targetMouse.x - currentMouse.x) * 0.1;
+      currentMouse.y += (targetMouse.y - currentMouse.y) * 0.1;
+
       // === CAMERA TRANSITION ===
-      // Wave view (scroll=0): Looking down at the flowing wave
-      // Sphere view (scroll=1): Looking at centered sphere (closer like original)
-      
       const waveCamPos = new THREE.Vector3(0, 30, 60);
-      const sphereCamPos = new THREE.Vector3(0, 0, 55); // Even closer
-      
+      const sphereCamPos = new THREE.Vector3(0, 0, 55);
+
       camera.position.lerpVectors(waveCamPos, sphereCamPos, scroll);
-      
-      // Smoothly transition lookAt
+
       const waveLookAt = new THREE.Vector3(0, 15, 0);
       const sphereLookAt = new THREE.Vector3(0, 0, 0);
       const lookAtTarget = new THREE.Vector3();
       lookAtTarget.lerpVectors(waveLookAt, sphereLookAt, scroll);
       camera.lookAt(lookAtTarget);
-      
-      // Camera up vector transition (wave has inverted up)
+
       const waveUp = new THREE.Vector3(0, -1, 0);
       const sphereUp = new THREE.Vector3(0, 1, 0);
       camera.up.lerpVectors(waveUp, sphereUp, scroll);
 
-      // === WAVE MODE MOTION (from hero_back_dots) ===
+      // === WAVE MODE MOTION ===
       const waveDamp = 1.0 - scroll;
-      
-      // Horizontal drift
-      particles.position.x = Math.sin(elapsedTime * 0.4) * 12 * waveDamp;
-      // Vertical breathing
-      particles.position.y = Math.sin(elapsedTime * 0.5) * 6 * waveDamp;
-      // Forward-backward
-      particles.position.z = Math.sin(elapsedTime * 0.35) * 5 * waveDamp;
-      
-      // Wave rotation
-      const waveRotX = -Math.PI / 2.2;
-      const sphereRotX = 0;
-      particles.rotation.x = waveRotX + (sphereRotX - waveRotX) * scroll;
-      
-      particles.rotation.z = Math.sin(elapsedTime * 0.3) * 0.08 * waveDamp;
-      particles.rotation.y = (Math.cos(elapsedTime * 0.25) * 0.05 * waveDamp) + (scroll * elapsedTime * 0.1);
 
-      // Gentle camera sway in wave mode
-      camera.position.x += Math.sin(elapsedTime * 0.2) * 3 * waveDamp;
-      camera.position.y += Math.cos(elapsedTime * 0.15) * 2 * waveDamp;
+      // Slower, gentler drift
+      particles.position.x = Math.sin(elapsedTime * 0.2) * 12 * waveDamp;
+      particles.position.y = Math.sin(elapsedTime * 0.25) * 6 * waveDamp;
+      particles.position.z = Math.sin(elapsedTime * 0.15) * 5 * waveDamp;
+
+      particles.rotation.z = Math.sin(elapsedTime * 0.15) * 0.08 * waveDamp;
+      particles.rotation.y = Math.cos(elapsedTime * 0.12) * 0.05 * waveDamp;
+
+      camera.position.x += Math.sin(elapsedTime * 0.1) * 3 * waveDamp;
+      camera.position.y += Math.cos(elapsedTime * 0.08) * 2 * waveDamp;
 
       renderer.render(scene, camera);
     };
 
     animate();
 
-    // ========================================
-    // EVENT HANDLERS
-    // ========================================
     const handleResize = () => {
       camera.aspect = window.innerWidth / window.innerHeight;
       camera.updateProjectionMatrix();
@@ -406,21 +452,25 @@ const MorphingWaveToSphere = () => {
     };
 
     const handleScroll = () => {
-      // Transition over 1.5 viewport heights
       const maxScroll = window.innerHeight * 1.5;
       const scrollProgress = Math.min(window.scrollY / maxScroll, 1.0);
       scrollRef.current.target = scrollProgress;
     };
 
+    const handleMouseMove = (e) => {
+      // Convert to NDC (-1 to +1)
+      mouseRef.current.x = (e.clientX / window.innerWidth) * 2 - 1;
+      mouseRef.current.y = -(e.clientY / window.innerHeight) * 2 + 1;
+    };
+
     window.addEventListener('resize', handleResize);
     window.addEventListener('scroll', handleScroll);
+    window.addEventListener('mousemove', handleMouseMove);
 
-    // ========================================
-    // CLEANUP
-    // ========================================
     return () => {
       window.removeEventListener('resize', handleResize);
       window.removeEventListener('scroll', handleScroll);
+      window.removeEventListener('mousemove', handleMouseMove);
       cancelAnimationFrame(frameIdRef.current);
       if (containerRef.current && renderer.domElement) {
         containerRef.current.removeChild(renderer.domElement);
